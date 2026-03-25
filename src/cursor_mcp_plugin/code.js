@@ -8,7 +8,7 @@ const state = {
 
 
 // Helper function for progress updates
-function sendProgressUpdate(
+async function sendProgressUpdate(
   commandId,
   commandType,
   status,
@@ -47,11 +47,15 @@ function sendProgressUpdate(
   figma.ui.postMessage(update);
   console.log(`Progress update: ${status} - ${progress}% - ${message}`);
 
+  // Yield so the Figma plugin sandbox flushes postMessage to ui.html
+  // before the next iteration begins
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
   return update;
 }
 
 // Show UI
-figma.showUI(__html__, { width: 350, height: 450 });
+figma.showUI(__html__, { width: 350, height: 600 });
 
 // Plugin commands from UI
 figma.ui.onmessage = async (msg) => {
@@ -142,7 +146,7 @@ async function handleCommand(command, params) {
     case "get_styles":
       return await getStyles();
     case "get_local_components":
-      return await getLocalComponents();
+      return await getLocalComponents(params);
     // case "get_team_components":
     //   return await getTeamComponents();
     case "create_component_instance":
@@ -229,6 +233,10 @@ async function handleCommand(command, params) {
       return await setDefaultConnector(params);
     case "create_connections":
       return await createConnections(params);
+    case "set_focus":
+      return await setFocus(params);
+    case "set_selections":
+      return await setSelections(params);
     case "list_variables":
       return await listVariables();
     case "get_node_variables":
@@ -1137,20 +1145,66 @@ async function getStyles() {
   };
 }
 
-async function getLocalComponents() {
-  await figma.loadAllPagesAsync();
+async function getLocalComponents(params) {
+  const commandId = (params && params.commandId) || generateCommandId();
+  const pages = figma.root.children;
+  const totalPages = pages.length;
 
-  const components = figma.root.findAllWithCriteria({
-    types: ["COMPONENT"],
-  });
+  await sendProgressUpdate(
+    commandId,
+    "get_local_components",
+    "started",
+    0,
+    totalPages,
+    0,
+    "Starting component scan across " + totalPages + " pages...",
+    null
+  );
+
+  var allComponents = [];
+
+  for (var i = 0; i < totalPages; i++) {
+    var page = pages[i];
+    await page.loadAsync();
+
+    var pageComponents = page.findAllWithCriteria({ types: ["COMPONENT"] });
+
+    for (var j = 0; j < pageComponents.length; j++) {
+      var component = pageComponents[j];
+      allComponents.push({
+        id: component.id,
+        name: component.name,
+        key: "key" in component ? component.key : null,
+      });
+    }
+
+    var progress = Math.round(((i + 1) / totalPages) * 100);
+    await sendProgressUpdate(
+      commandId,
+      "get_local_components",
+      "in_progress",
+      progress,
+      totalPages,
+      i + 1,
+      "Scanned " + page.name + ": " + pageComponents.length + " components (total so far: " + allComponents.length + ")",
+      null
+    );
+  }
+
+  await sendProgressUpdate(
+    commandId,
+    "get_local_components",
+    "completed",
+    100,
+    totalPages,
+    totalPages,
+    "Found " + allComponents.length + " components across " + totalPages + " pages",
+    null
+  );
 
   return {
-    count: components.length,
-    components: components.map((component) => ({
-      id: component.id,
-      name: component.name,
-      key: "key" in component ? component.key : null,
-    })),
+    count: allComponents.length,
+    components: allComponents,
   };
 }
 
@@ -1174,20 +1228,46 @@ async function getLocalComponents() {
 // }
 
 async function createComponentInstance(params) {
-  const { componentKey, x = 0, y = 0 } = params || {};
+  const { componentKey, componentId, x = 0, y = 0, parentId } = params || {};
 
-  if (!componentKey) {
-    throw new Error("Missing componentKey parameter");
+  if (!componentKey && !componentId) {
+    throw new Error("Missing componentKey or componentId parameter. Use componentId for local components (from get_local_components), or componentKey for published library components.");
   }
 
   try {
-    const component = await figma.importComponentByKeyAsync(componentKey);
-    const instance = component.createInstance();
+    let component;
 
+    if (componentId) {
+      // Local component: get node directly by ID
+      const node = await figma.getNodeByIdAsync(componentId);
+      if (!node) {
+        throw new Error(`Component node not found with id: ${componentId}`);
+      }
+      if (node.type !== "COMPONENT") {
+        throw new Error(`Node ${componentId} is not a COMPONENT (got type: ${node.type}). Use get_local_components to find valid component IDs.`);
+      }
+      component = node;
+    } else {
+      // Published library component: import by key
+      component = await figma.importComponentByKeyAsync(componentKey);
+    }
+
+    const instance = component.createInstance();
     instance.x = x;
     instance.y = y;
 
-    figma.currentPage.appendChild(instance);
+    if (parentId) {
+      const parent = await figma.getNodeByIdAsync(parentId);
+      if (parent && "appendChild" in parent) {
+        parent.appendChild(instance);
+      } else {
+        figma.currentPage.appendChild(instance);
+      }
+    } else {
+      figma.currentPage.appendChild(instance);
+    }
+
+    const mainComponent = await instance.getMainComponentAsync();
 
     return {
       id: instance.id,
@@ -1196,7 +1276,7 @@ async function createComponentInstance(params) {
       y: instance.y,
       width: instance.width,
       height: instance.height,
-      componentId: instance.componentId,
+      mainComponentId: mainComponent ? mainComponent.id : undefined,
     };
   } catch (error) {
     throw new Error(`Error creating component instance: ${error.message}`);
@@ -2666,10 +2746,26 @@ async function getAnnotations(params) {
         throw new Error(`Node type ${node.type} does not support annotations`);
       }
 
+      // Collect annotations from this node and all its descendants
+      const mergedAnnotations = [];
+      const collect = async (n) => {
+        if ("annotations" in n && n.annotations && n.annotations.length > 0) {
+          for (const a of n.annotations) {
+            mergedAnnotations.push({ nodeId: n.id, annotation: a });
+          }
+        }
+        if ("children" in n) {
+          for (const child of n.children) {
+            await collect(child);
+          }
+        }
+      };
+      await collect(node);
+
       const result = {
         nodeId: node.id,
         name: node.name,
-        annotations: node.annotations || [],
+        annotations: mergedAnnotations,
       };
 
       if (includeCategories) {
@@ -3760,7 +3856,12 @@ async function setLayoutSizing(params) {
 }
 
 async function setItemSpacing(params) {
-  const { nodeId, itemSpacing } = params || {};
+  const { nodeId, itemSpacing, counterAxisSpacing } = params || {};
+
+  // Validate that at least one spacing parameter is provided
+  if (itemSpacing === undefined && counterAxisSpacing === undefined) {
+    throw new Error("At least one of itemSpacing or counterAxisSpacing must be provided");
+  }
 
   // Get the target node
   const node = await figma.getNodeByIdAsync(nodeId);
@@ -3785,7 +3886,7 @@ async function setItemSpacing(params) {
     );
   }
 
-  // Set item spacing
+  // Set item spacing if provided
   if (itemSpacing !== undefined) {
     if (typeof itemSpacing !== "number") {
       throw new Error("Item spacing must be a number");
@@ -3793,11 +3894,27 @@ async function setItemSpacing(params) {
     node.itemSpacing = itemSpacing;
   }
 
+  // Set counter axis spacing if provided
+  if (counterAxisSpacing !== undefined) {
+    if (typeof counterAxisSpacing !== "number") {
+      throw new Error("Counter axis spacing must be a number");
+    }
+    // counterAxisSpacing only applies when layoutWrap is WRAP
+    if (node.layoutWrap !== "WRAP") {
+      throw new Error(
+        "Counter axis spacing can only be set on frames with layoutWrap set to WRAP"
+      );
+    }
+    node.counterAxisSpacing = counterAxisSpacing;
+  }
+
   return {
     id: node.id,
     name: node.name,
-    itemSpacing: node.itemSpacing,
+    itemSpacing: node.itemSpacing || undefined,
+    counterAxisSpacing: node.counterAxisSpacing || undefined,
     layoutMode: node.layoutMode,
+    layoutWrap: node.layoutWrap,
   };
 }
 
@@ -4191,5 +4308,77 @@ async function createConnections(params) {
     success: true,
     count: results.length,
     connections: results
+  };
+}
+
+// Set focus on a specific node
+async function setFocus(params) {
+  if (!params || !params.nodeId) {
+    throw new Error("Missing nodeId parameter");
+  }
+
+  const node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) {
+    throw new Error(`Node with ID ${params.nodeId} not found`);
+  }
+
+  // Set selection to the node
+  figma.currentPage.selection = [node];
+  
+  // Scroll and zoom to show the node in viewport
+  figma.viewport.scrollAndZoomIntoView([node]);
+
+  return {
+    success: true,
+    name: node.name,
+    id: node.id,
+    message: `Focused on node "${node.name}"`
+  };
+}
+
+// Set selection to multiple nodes
+async function setSelections(params) {
+  if (!params || !params.nodeIds || !Array.isArray(params.nodeIds)) {
+    throw new Error("Missing or invalid nodeIds parameter");
+  }
+
+  if (params.nodeIds.length === 0) {
+    throw new Error("nodeIds array cannot be empty");
+  }
+
+  // Get all valid nodes
+  const nodes = [];
+  const notFoundIds = [];
+  
+  for (const nodeId of params.nodeIds) {
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (node) {
+      nodes.push(node);
+    } else {
+      notFoundIds.push(nodeId);
+    }
+  }
+
+  if (nodes.length === 0) {
+    throw new Error(`No valid nodes found for the provided IDs: ${params.nodeIds.join(', ')}`);
+  }
+
+  // Set selection to the nodes
+  figma.currentPage.selection = nodes;
+  
+  // Scroll and zoom to show all nodes in viewport
+  figma.viewport.scrollAndZoomIntoView(nodes);
+
+  const selectedNodes = nodes.map(node => ({
+    name: node.name,
+    id: node.id
+  }));
+
+  return {
+    success: true,
+    count: nodes.length,
+    selectedNodes: selectedNodes,
+    notFoundIds: notFoundIds,
+    message: `Selected ${nodes.length} nodes${notFoundIds.length > 0 ? ` (${notFoundIds.length} not found)` : ''}`
   };
 }

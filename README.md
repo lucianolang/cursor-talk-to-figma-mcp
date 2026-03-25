@@ -1,6 +1,6 @@
-# Cursor Talk to Figma MCP
+# Talk to Figma MCP
 
-This project implements a Model Context Protocol (MCP) integration between Cursor AI and Figma, allowing Cursor to communicate with Figma for reading designs and modifying them programmatically.
+This project implements a Model Context Protocol (MCP) integration between AI agent (Cursor, Claude Code) and Figma, allowing AI agent to communicate with Figma for reading designs and modifying them programmatically.
 
 https://github.com/user-attachments/assets/129a14d2-ed73-470f-9a4c-2240b2a4885c
 
@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/129a14d2-ed73-470f-9a4c-2240b2a4885c
 - `src/cursor_mcp_plugin/` - Figma plugin for communicating with Cursor
 - `src/socket.ts` - WebSocket server that facilitates communication between the MCP server and Figma plugin
 
-## Get Started
+## How to use
 
 1. Install Bun if you haven't already:
 
@@ -30,13 +30,7 @@ bun setup
 bun socket
 ```
 
-4. MCP server
-
-```bash
-bunx cursor-talk-to-figma-mcp
-```
-
-5. **NEW** Install Figma plugin from [Figma community page](https://www.figma.com/community/plugin/1485687494525374295/cursor-talk-to-figma-mcp-plugin) or [install locally](#figma-plugin)
+4. **NEW** Install Figma plugin from [Figma community page](https://www.figma.com/community/plugin/1485687494525374295/cursor-talk-to-figma-mcp-plugin) or [install locally](#figma-plugin)
 
 ## Quick Video Tutorial
 
@@ -113,6 +107,21 @@ bun socket
 4. Connect the plugin to the WebSocket server by joining a channel using `join_channel`
 5. Use Cursor to communicate with Figma using the MCP tools
 
+## Local Development Setup
+
+To develop, update your mcp config to direct to your local directory.
+
+```json
+{
+  "mcpServers": {
+    "TalkToFigma": {
+      "command": "bun",
+      "args": ["/path-to-repo/src/talk_to_figma_mcp/server.ts"]
+    }
+  }
+}
+```
+
 ## MCP Tools
 
 The MCP server provides the following tools for interacting with Figma:
@@ -124,6 +133,8 @@ The MCP server provides the following tools for interacting with Figma:
 - `read_my_design` - Get detailed node information about the current selection without parameters
 - `get_node_info` - Get detailed information about a specific node
 - `get_nodes_info` - Get detailed information about multiple nodes by providing an array of node IDs
+- `set_focus` - Set focus on a specific node by selecting it and scrolling viewport to it
+- `set_selections` - Set selection to multiple nodes and scroll viewport to show them
 
 ### Annotations
 

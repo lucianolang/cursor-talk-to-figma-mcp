@@ -6,6 +6,26 @@ const state = {
   serverPort: 3055, // Default port
 };
 
+// Cache variable metadata so broken aliases can retain names when the target was seen earlier.
+const variableMetadataCache = new Map();
+
+function rememberVariableMetadata(variable, collectionName = null) {
+  if (!variable || !variable.id) return;
+
+  const metadata = {
+    id: variable.id,
+    name: variable.name || null,
+    key: variable.key || null,
+    variableCollectionId: variable.variableCollectionId || null,
+    collectionName: collectionName || null,
+  };
+
+  variableMetadataCache.set(variable.id, metadata);
+  if (metadata.key) {
+    variableMetadataCache.set(`key:${metadata.key}`, metadata);
+  }
+}
+
 
 // Helper function for progress updates
 async function sendProgressUpdate(
@@ -245,10 +265,14 @@ async function handleCommand(command, params) {
       return await findVariableUsages(params);
     case "get_node_variables":
       return await getNodeVariables(params);
+    case "find_broken_variable_aliases":
+      return await findBrokenVariableAliases(params);
     case "create_variable":
       return await createVariable(params);
     case "set_variable_value":
       return await setVariableValue(params);
+    case "delete_variables":
+      return await deleteVariables(params);
     case "list_collections":
       return await listCollections();
     case "set_node_paints":
@@ -1632,6 +1656,7 @@ async function resolveVariableValue(variable, modeId, visited = new Set()) {
 
 async function serializeVariable(variable, options = {}) {
   const collection = await getVariableCollectionCached(variable.variableCollectionId);
+  rememberVariableMetadata(variable, collection && collection.name ? collection.name : null);
   const serialized = {
     id: variable.id,
     name: variable.name,
@@ -1891,6 +1916,51 @@ async function getNodeVariables(params) {
   return { nodeId, boundVariables: node.boundVariables };
 }
 
+async function findBrokenVariableAliases(params) {
+  const { collectionId } = params || {};
+  if (!collectionId) throw new Error("Missing collectionId parameter");
+  if (!figma.variables || !figma.variables.getLocalVariablesAsync) {
+    throw new Error("Figma Variables API not available");
+  }
+
+  const variables = await figma.variables.getLocalVariablesAsync();
+  const variableIds = new Set(variables.map((variable) => variable.id));
+  const broken = [];
+
+  for (const variable of variables) {
+    if (variable.variableCollectionId !== collectionId) continue;
+    const collection = await getVariableCollectionCached(variable.variableCollectionId);
+    rememberVariableMetadata(variable, collection && collection.name ? collection.name : null);
+
+    for (const [modeId, value] of Object.entries(variable.valuesByMode || {})) {
+      if (!value || typeof value !== "object" || value.type !== "VARIABLE_ALIAS") continue;
+      if (variableIds.has(value.id)) continue;
+
+      const cachedReference = variableMetadataCache.get(value.id) || null;
+
+      broken.push({
+        id: variable.id,
+        name: variable.name,
+        variableCollectionId: variable.variableCollectionId,
+        collectionName: collection && collection.name ? collection.name : null,
+        resolvedType: variable.resolvedType,
+        modeId,
+        missingReferenceId: value.id,
+        missingReferenceName: cachedReference && cachedReference.name ? cachedReference.name : null,
+        missingReferenceKey: cachedReference && cachedReference.key ? cachedReference.key : null,
+        missingReferenceCollectionId: cachedReference && cachedReference.variableCollectionId ? cachedReference.variableCollectionId : null,
+        missingReferenceCollectionName: cachedReference && cachedReference.collectionName ? cachedReference.collectionName : null,
+      });
+    }
+  }
+
+  return {
+    collectionId,
+    brokenCount: broken.length,
+    broken,
+  };
+}
+
 async function listCollections(params) { 
   if (!figma.variables || !figma.variables.getLocalVariableCollectionsAsync) {
     throw new Error("Figma Variables API not available");
@@ -2000,6 +2070,55 @@ async function setVariableValue(params) {
     throw new Error("Unsupported valueType");
   }
   return { success: true, variableId, mode, value };
+}
+
+async function deleteVariables(params) {
+  const { variableIds } = params || {};
+  if (!Array.isArray(variableIds) || variableIds.length === 0) {
+    throw new Error("Missing variableIds parameter");
+  }
+  if (!figma.variables || !figma.variables.getVariableByIdAsync) {
+    throw new Error("Figma Variables API not available");
+  }
+
+  const deleted = [];
+  const failed = [];
+
+  for (const variableId of variableIds) {
+    try {
+      const variable = await figma.variables.getVariableByIdAsync(variableId);
+      if (!variable) {
+        failed.push({ variableId, error: `Variable not found: ${variableId}` });
+        continue;
+      }
+      if (typeof variable.remove !== "function") {
+        failed.push({ variableId, name: variable.name, error: "Variable removal is not supported by this Figma runtime" });
+        continue;
+      }
+
+      rememberVariableMetadata(variable);
+      const snapshot = {
+        variableId: variable.id,
+        name: variable.name,
+        variableCollectionId: variable.variableCollectionId,
+      };
+      variable.remove();
+      deleted.push(snapshot);
+    } catch (error) {
+      failed.push({
+        variableId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return {
+    success: failed.length === 0,
+    deletedCount: deleted.length,
+    failedCount: failed.length,
+    deleted,
+    failed,
+  };
 }
 
 // --- setNodePaints: Set fills or strokes on a node ---

@@ -28,7 +28,9 @@ var server = new McpServer({
 var args = process.argv.slice(2);
 var serverArg = args.find((arg) => arg.startsWith("--server="));
 var serverUrl = serverArg ? serverArg.split("=")[1] : "localhost";
-var WS_URL = serverUrl === "localhost" ? `ws://${serverUrl}` : `wss://${serverUrl}`;
+var hasScheme = /^wss?:\/\//.test(serverUrl);
+var isLocalServer = /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(serverUrl);
+var WS_URL = hasScheme ? serverUrl : isLocalServer ? `ws://${serverUrl}` : `wss://${serverUrl}`;
 server.tool(
   "get_document_info",
   "Get detailed information about the current Figma document",
@@ -2324,119 +2326,247 @@ This detailed process ensures you correctly interpret the reaction data, prepare
     };
   }
 );
-server.tool(
+server.registerTool(
   "list_variables",
-  "List all local variables in the current Figma document. Returns variable objects including collection metadata and mode values.",
-  {},
+  {
+    description: "List all local variables in the current Figma document. Returns variable objects including collection metadata and mode values.",
+    inputSchema: {},
+    outputSchema: {
+      success: z.boolean(),
+      variables: z.array(z.unknown()),
+      error: z.string().optional()
+    }
+  },
   async () => {
     try {
-      const result = await sendCommandToFigma("list_variables");
+      const variables = await sendCommandToFigma("list_variables");
+      const structuredContent = {
+        success: true,
+        variables: Array.isArray(variables) ? variables : []
+      };
       return {
+        structuredContent,
         content: [
           {
             type: "text",
-            text: JSON.stringify(result, null, 2)
+            text: JSON.stringify(structuredContent, null, 2)
           }
         ]
       };
     } catch (error) {
+      const message = `Error listing variables: ${error instanceof Error ? error.message : String(error)}`;
       return {
+        structuredContent: {
+          success: false,
+          variables: [],
+          error: message
+        },
         content: [
           {
             type: "text",
-            text: `Error listing variables: ${error instanceof Error ? error.message : String(error)}`
+            text: message
           }
-        ]
+        ],
+        isError: true
       };
     }
   }
 );
-server.tool(
+server.registerTool(
   "list_variables_in_collection",
-  "List local variables for a specific collection ID in the current Figma document.",
   {
-    collectionId: z.string().describe("The collection ID to filter variables by")
+    description: "List local variables for a specific collection ID in the current Figma document.",
+    inputSchema: {
+      collectionId: z.string().describe("The collection ID to filter variables by")
+    },
+    outputSchema: {
+      success: z.boolean(),
+      variables: z.array(z.unknown()),
+      error: z.string().optional()
+    }
   },
   async ({ collectionId }) => {
     try {
-      const result = await sendCommandToFigma("list_variables_in_collection", { collectionId });
+      const variables = await sendCommandToFigma("list_variables_in_collection", { collectionId });
+      const structuredContent = {
+        success: true,
+        variables: Array.isArray(variables) ? variables : []
+      };
       return {
+        structuredContent,
         content: [
           {
             type: "text",
-            text: JSON.stringify(result, null, 2)
+            text: JSON.stringify(structuredContent, null, 2)
           }
         ]
       };
     } catch (error) {
+      const message = `Error listing collection variables: ${error instanceof Error ? error.message : String(error)}`;
       return {
+        structuredContent: {
+          success: false,
+          variables: [],
+          error: message
+        },
         content: [
           {
             type: "text",
-            text: `Error listing collection variables: ${error instanceof Error ? error.message : String(error)}`
+            text: message
           }
-        ]
+        ],
+        isError: true
       };
     }
   }
 );
-server.tool(
+server.registerTool(
   "find_variable_usages",
-  "Find sample usages of a variable across pages in the current Figma document.",
   {
-    variableId: z.string().describe("The variable ID to inspect"),
-    sampleLimit: z.number().optional().describe("Maximum number of usage samples to return"),
-    pageId: z.string().optional().describe("Optional page ID to restrict the scan to"),
-    currentPageOnly: z.boolean().optional().describe("When true, only scan the currently open page")
+    description: "Find sample usages of a variable across pages in the current Figma document.",
+    inputSchema: {
+      variableId: z.string().describe("The variable ID to inspect"),
+      sampleLimit: z.number().optional().describe("Maximum number of usage samples to return"),
+      pageId: z.string().optional().describe("Optional page ID to restrict the scan to"),
+      currentPageOnly: z.boolean().optional().describe("When true, only scan the currently open page")
+    },
+    outputSchema: {
+      success: z.boolean(),
+      usageSummary: z.unknown().nullable(),
+      error: z.string().optional()
+    }
   },
   async ({ variableId, sampleLimit, pageId, currentPageOnly }) => {
     try {
-      const result = await sendCommandToFigma("find_variable_usages", { variableId, sampleLimit, pageId, currentPageOnly });
+      const usageSummary = await sendCommandToFigma("find_variable_usages", { variableId, sampleLimit, pageId, currentPageOnly });
+      const structuredContent = {
+        success: true,
+        usageSummary: usageSummary ?? null
+      };
       return {
+        structuredContent,
         content: [
           {
             type: "text",
-            text: JSON.stringify(result, null, 2)
+            text: JSON.stringify(structuredContent, null, 2)
           }
         ]
       };
     } catch (error) {
+      const message = `Error finding variable usages: ${error instanceof Error ? error.message : String(error)}`;
       return {
+        structuredContent: {
+          success: false,
+          usageSummary: null,
+          error: message
+        },
         content: [
           {
             type: "text",
-            text: `Error finding variable usages: ${error instanceof Error ? error.message : String(error)}`
+            text: message
           }
-        ]
+        ],
+        isError: true
       };
     }
   }
 );
-server.tool(
-  "get_node_variables",
-  "Get all variable bindings for a specific node. Returns an object mapping property types (e.g., 'fills', 'strokes', 'opacity', etc.) to variable binding info.",
+server.registerTool(
+  "find_broken_variable_aliases",
   {
-    nodeId: z.string().describe("The ID of the node to get variable bindings for")
+    description: "Find variables in a collection whose alias references point to missing local variables.",
+    inputSchema: {
+      collectionId: z.string().describe("The collection ID to inspect")
+    },
+    outputSchema: {
+      success: z.boolean(),
+      brokenAliases: z.array(z.unknown()),
+      brokenCount: z.number(),
+      error: z.string().optional()
+    }
   },
-  async ({ nodeId }) => {
+  async ({ collectionId }) => {
     try {
-      const result = await sendCommandToFigma("get_node_variables", { nodeId });
+      const result = await sendCommandToFigma("find_broken_variable_aliases", { collectionId });
+      const brokenAliases = Array.isArray(result?.broken) ? result.broken : [];
+      const structuredContent = {
+        success: true,
+        brokenAliases,
+        brokenCount: typeof result?.brokenCount === "number" ? result.brokenCount : brokenAliases.length
+      };
       return {
+        structuredContent,
         content: [
           {
             type: "text",
-            text: `These are the variables for the node: ${JSON.stringify(result, null, 2)}, you may use the 'list_variables' tool to find the name of the variables.`
+            text: JSON.stringify(structuredContent, null, 2)
           }
         ]
       };
     } catch (error) {
+      const message = `Error finding broken variable aliases: ${error instanceof Error ? error.message : String(error)}`;
       return {
+        structuredContent: {
+          success: false,
+          brokenAliases: [],
+          brokenCount: 0,
+          error: message
+        },
         content: [
           {
             type: "text",
-            text: `Error getting node variables: ${error instanceof Error ? error.message : String(error)}`
+            text: message
+          }
+        ],
+        isError: true
+      };
+    }
+  }
+);
+server.registerTool(
+  "get_node_variables",
+  {
+    description: "Get all variable bindings for a specific node. Returns an object mapping property types (e.g., 'fills', 'strokes', 'opacity', etc.) to variable binding info.",
+    inputSchema: {
+      nodeId: z.string().describe("The ID of the node to get variable bindings for")
+    },
+    outputSchema: {
+      success: z.boolean(),
+      nodeVariables: z.unknown().nullable(),
+      error: z.string().optional()
+    }
+  },
+  async ({ nodeId }) => {
+    try {
+      const nodeVariables = await sendCommandToFigma("get_node_variables", { nodeId });
+      const structuredContent = {
+        success: true,
+        nodeVariables: nodeVariables ?? null
+      };
+      return {
+        structuredContent,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(structuredContent, null, 2)
           }
         ]
+      };
+    } catch (error) {
+      const message = `Error getting node variables: ${error instanceof Error ? error.message : String(error)}`;
+      return {
+        structuredContent: {
+          success: false,
+          nodeVariables: null,
+          error: message
+        },
+        content: [
+          {
+            type: "text",
+            text: message
+          }
+        ],
+        isError: true
       };
     }
   }
@@ -2523,6 +2653,35 @@ server.tool(
           {
             type: "text",
             text: `Error setting variable value: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
+  "delete_variables",
+  "Delete multiple variables from the Figma document. Use only after confirming the variables are safe to remove.",
+  {
+    variableIds: z.array(z.string()).min(1).describe("The IDs of the variables to delete")
+  },
+  async ({ variableIds }) => {
+    try {
+      const result = await sendCommandToFigma("delete_variables", { variableIds });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error deleting variables: ${error instanceof Error ? error.message : String(error)}`
           }
         ]
       };

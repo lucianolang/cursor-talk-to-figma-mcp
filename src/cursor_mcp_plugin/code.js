@@ -238,7 +238,11 @@ async function handleCommand(command, params) {
     case "set_selections":
       return await setSelections(params);
     case "list_variables":
-      return await listVariables();
+      return await listVariables(params);
+    case "list_variables_in_collection":
+      return await listVariablesInCollection(params);
+    case "find_variable_usages":
+      return await findVariableUsages(params);
     case "get_node_variables":
       return await getNodeVariables(params);
     case "create_variable":
@@ -1483,21 +1487,398 @@ async function setTextContent(params) {
 
 // === Figma Variables Support ===
 
+const variableCollectionCache = new Map();
+
+function isVariableAlias(value) {
+  return (
+    value &&
+    typeof value === "object" &&
+    value.type === "VARIABLE_ALIAS" &&
+    typeof value.id === "string"
+  );
+}
+
+async function getVariableCollectionCached(collectionId) {
+  if (
+    !collectionId ||
+    !figma.variables ||
+    !figma.variables.getVariableCollectionByIdAsync
+  ) {
+    return null;
+  }
+
+  if (variableCollectionCache.has(collectionId)) {
+    return variableCollectionCache.get(collectionId);
+  }
+
+  const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  variableCollectionCache.set(collectionId, collection || null);
+  return collection || null;
+}
+
+function getCollectionModes(collection) {
+  return Array.isArray(collection && collection.modes)
+    ? collection.modes.map((mode) => ({
+        modeId: mode.modeId,
+        name: mode.name,
+      }))
+    : [];
+}
+
+async function getTargetModeId(sourceVariable, sourceModeId, targetVariable) {
+  if (targetVariable.valuesByMode && targetVariable.valuesByMode[sourceModeId]) {
+    return sourceModeId;
+  }
+
+  const [sourceCollection, targetCollection] = await Promise.all([
+    getVariableCollectionCached(sourceVariable.variableCollectionId),
+    getVariableCollectionCached(targetVariable.variableCollectionId),
+  ]);
+
+  const sourceMode = getCollectionModes(sourceCollection).find(
+    (mode) => mode.modeId === sourceModeId
+  );
+  const sourceModeName = sourceMode ? sourceMode.name : null;
+
+  if (sourceModeName) {
+    const matchingTargetMode = getCollectionModes(targetCollection).find(
+      (mode) =>
+        mode.name.trim().toLowerCase() === sourceModeName.trim().toLowerCase() &&
+        targetVariable.valuesByMode &&
+        targetVariable.valuesByMode[mode.modeId]
+    );
+
+    if (matchingTargetMode) {
+      return matchingTargetMode.modeId;
+    }
+  }
+
+  if (
+    targetCollection &&
+    targetCollection.defaultModeId &&
+    targetVariable.valuesByMode &&
+    targetVariable.valuesByMode[targetCollection.defaultModeId]
+  ) {
+    return targetCollection.defaultModeId;
+  }
+
+  const targetModeIds = Object.keys(targetVariable.valuesByMode || {});
+  return targetModeIds[0] || sourceModeId;
+}
+
+async function resolveVariableValue(variable, modeId, visited = new Set()) {
+  const visitKey = `${variable.id}:${modeId}`;
+  if (visited.has(visitKey)) {
+    return {
+      resolvedValue: null,
+      immediateAlias: null,
+      aliasChain: [],
+      error: "Circular variable alias detected",
+    };
+  }
+
+  visited.add(visitKey);
+  const rawValue = variable.valuesByMode ? variable.valuesByMode[modeId] : undefined;
+
+  if (!isVariableAlias(rawValue)) {
+    return {
+      resolvedValue: rawValue === undefined ? null : rawValue,
+      immediateAlias: null,
+      aliasChain: [],
+      targetModeId: modeId,
+    };
+  }
+
+  const refVariable = await figma.variables.getVariableByIdAsync(rawValue.id);
+  const immediateAlias = refVariable
+    ? {
+        id: refVariable.id,
+        name: refVariable.name,
+        variableCollectionId: refVariable.variableCollectionId,
+      }
+    : {
+        id: rawValue.id,
+        name: null,
+        variableCollectionId: null,
+      };
+
+  if (!refVariable) {
+    return {
+      resolvedValue: rawValue,
+      immediateAlias,
+      aliasChain: [immediateAlias],
+      error: `Unable to resolve referenced variable: ${rawValue.id}`,
+      targetModeId: modeId,
+    };
+  }
+
+  const targetModeId = await getTargetModeId(variable, modeId, refVariable);
+  const nested = await resolveVariableValue(refVariable, targetModeId, visited);
+  const aliasChain = [immediateAlias];
+  if (nested.aliasChain && nested.aliasChain.length > 0) {
+    for (const aliasEntry of nested.aliasChain) {
+      aliasChain.push(aliasEntry);
+    }
+  }
+
+  return {
+    resolvedValue: nested.resolvedValue === undefined || nested.resolvedValue === null ? rawValue : nested.resolvedValue,
+    immediateAlias,
+    aliasChain,
+    error: nested.error,
+    targetModeId,
+  };
+}
+
+async function serializeVariable(variable, options = {}) {
+  const collection = await getVariableCollectionCached(variable.variableCollectionId);
+  const serialized = {
+    id: variable.id,
+    name: variable.name,
+    key: variable.key,
+    variableCollectionId: variable.variableCollectionId,
+    collectionName: collection && collection.name ? collection.name : null,
+    resolvedType: variable.resolvedType,
+    valuesByMode: variable.valuesByMode,
+    scopes: variable.scopes,
+    description: variable.description,
+  };
+
+  if (!options.resolveValues) {
+    return serialized;
+  }
+
+  const resolvedValuesByMode = {};
+  const aliasInfoByMode = {};
+  const resolutionErrorsByMode = {};
+
+  for (const modeId of Object.keys(variable.valuesByMode || {})) {
+    const resolution = await resolveVariableValue(variable, modeId);
+    resolvedValuesByMode[modeId] = resolution.resolvedValue;
+
+    if (resolution.immediateAlias) {
+      aliasInfoByMode[modeId] = {
+        id: resolution.immediateAlias.id,
+        name: resolution.immediateAlias.name,
+        variableCollectionId: resolution.immediateAlias.variableCollectionId,
+        targetModeId: resolution.targetModeId,
+        aliasChain: resolution.aliasChain,
+      };
+    }
+
+    if (resolution.error) {
+      resolutionErrorsByMode[modeId] = resolution.error;
+    }
+  }
+
+  serialized.resolvedValuesByMode = resolvedValuesByMode;
+  if (Object.keys(aliasInfoByMode).length > 0) {
+    serialized.aliasInfoByMode = aliasInfoByMode;
+  }
+  if (Object.keys(resolutionErrorsByMode).length > 0) {
+    serialized.resolutionErrorsByMode = resolutionErrorsByMode;
+  }
+
+  return serialized;
+}
+
 // List all local variables in the document
-async function listVariables() {
+async function listVariables(params) {
+  if (!figma.variables || !figma.variables.getLocalVariablesAsync) {
+    throw new Error("Figma Variables API not available");
+  }
+  const resolveValues = Boolean(params && params.resolveValues);
+  const variables = await figma.variables.getLocalVariablesAsync();
+  return await Promise.all(
+    variables.map((variable) => serializeVariable(variable, { resolveValues }))
+  );
+}
+
+async function listVariablesInCollection(params) {
+  const { collectionId, resolveValues } = params || {};
+  if (!collectionId) {
+    throw new Error("Missing collectionId parameter");
+  }
   if (!figma.variables || !figma.variables.getLocalVariablesAsync) {
     throw new Error("Figma Variables API not available");
   }
   const variables = await figma.variables.getLocalVariablesAsync();
-  return variables.map(v => ({
-    id: v.id,
-    name: v.name,
-    key: v.key,
-    resolvedType: v.resolvedType,
-    valuesByMode: v.valuesByMode,
-    scopes: v.scopes,
-    description: v.description
-  }));
+  const scopedVariables = variables.filter(
+    (variable) => variable.variableCollectionId === collectionId
+  );
+  return await Promise.all(
+    scopedVariables.map((variable) => serializeVariable(variable, { resolveValues: Boolean(resolveValues) }))
+  );
+}
+
+function nodeUsesVariable(node, variableId) {
+  const matches = [];
+
+  if (node.boundVariables) {
+    for (const [propertyName, binding] of Object.entries(node.boundVariables)) {
+      if (!binding) continue;
+
+      if (Array.isArray(binding)) {
+        for (const item of binding) {
+          if (item && item.id === variableId) {
+            matches.push(`boundVariables.${propertyName}`);
+          }
+          if (item && item.variableId === variableId) {
+            matches.push(`boundVariables.${propertyName}`);
+          }
+        }
+        continue;
+      }
+
+      if (binding.id === variableId || binding.variableId === variableId) {
+        matches.push(`boundVariables.${propertyName}`);
+      }
+    }
+  }
+
+  const paintGroups = [
+    { name: "fills", paints: node.fills },
+    { name: "strokes", paints: node.strokes },
+  ];
+
+  for (const group of paintGroups) {
+    if (!Array.isArray(group.paints)) continue;
+    for (let index = 0; index < group.paints.length; index += 1) {
+      const paint = group.paints[index];
+      if (!paint || !paint.boundVariables) continue;
+
+      for (const [bindingName, binding] of Object.entries(paint.boundVariables)) {
+        if (!binding) continue;
+        if (binding.id === variableId || binding.variableId === variableId) {
+          matches.push(`${group.name}[${index}].boundVariables.${bindingName}`);
+        }
+      }
+    }
+  }
+
+  return matches;
+}
+
+function getNodePath(node) {
+  const path = [];
+  let current = node;
+
+  while (current) {
+    path.unshift(current.name || `Unnamed ${current.type}`);
+    current = current.parent;
+  }
+
+  return path;
+}
+
+function getUsageContext(node) {
+  let current = node.parent;
+  let component = null;
+  let frame = null;
+
+  while (current) {
+    if (!component && (current.type === "COMPONENT" || current.type === "COMPONENT_SET" || current.type === "INSTANCE")) {
+      component = {
+        id: current.id,
+        name: current.name,
+        type: current.type,
+      };
+    }
+
+    if (!frame && (current.type === "FRAME" || current.type === "SECTION")) {
+      frame = {
+        id: current.id,
+        name: current.name,
+        type: current.type,
+      };
+    }
+
+    current = current.parent;
+  }
+
+  return {
+    component,
+    frame,
+  };
+}
+
+async function findVariableUsages(params) {
+  const { variableId, sampleLimit = 25, pageId, currentPageOnly = false } = params || {};
+
+  if (!variableId) {
+    throw new Error("Missing variableId parameter");
+  }
+
+  const variable = await figma.variables.getVariableByIdAsync(variableId);
+  if (!variable) {
+    throw new Error(`Variable not found: ${variableId}`);
+  }
+
+  const usages = [];
+  async function collectUsages(node, page) {
+    if (usages.length >= sampleLimit) return;
+
+    const usageProperties = nodeUsesVariable(node, variableId);
+    if (usageProperties.length > 0) {
+      usages.push({
+        page: {
+          id: page.id,
+          name: page.name,
+        },
+        node: {
+          id: node.id,
+          name: node.name || `Unnamed ${node.type}`,
+          type: node.type,
+        },
+        path: getNodePath(node),
+        usageProperties,
+        context: getUsageContext(node),
+      });
+    }
+
+    if (usages.length >= sampleLimit) return;
+
+    if ("children" in node) {
+      for (const child of node.children) {
+        await collectUsages(child, page);
+        if (usages.length >= sampleLimit) return;
+      }
+    }
+  }
+
+  let pages = [];
+  if (currentPageOnly) {
+    pages = [figma.currentPage];
+  } else if (pageId) {
+    const matchedPage = figma.root.children.find((candidate) => candidate.id === pageId);
+    if (!matchedPage) {
+      throw new Error(`Page not found: ${pageId}`);
+    }
+    pages = [matchedPage];
+  } else {
+    pages = figma.root.children;
+  }
+
+  for (const page of pages) {
+    if (usages.length >= sampleLimit) break;
+    await page.loadAsync();
+    for (const child of page.children) {
+      await collectUsages(child, page);
+      if (usages.length >= sampleLimit) break;
+    }
+  }
+
+  return {
+    variable: {
+      id: variable.id,
+      name: variable.name,
+      variableCollectionId: variable.variableCollectionId,
+    },
+    scanScope: currentPageOnly ? "current-page" : pageId ? "single-page" : "document",
+    usageCount: usages.length,
+    sampleLimit,
+    usages,
+  };
 }
 
 // Get variable bindings for a node
@@ -1519,7 +1900,9 @@ async function listCollections(params) {
     id: c.id,
     name: c.name,
     key: c.key,
-    description: c.description
+    description: c.description,
+    defaultModeId: c.defaultModeId,
+    modes: getCollectionModes(c)
   }));
 }
 
@@ -1550,6 +1933,7 @@ async function createVariable(params) {
     id: variable.id,
     name: variable.name,
     key: variable.key,
+    variableCollectionId: variable.variableCollectionId,
     resolvedType: variable.resolvedType,
     valuesByMode: variable.valuesByMode,
     scopes: variable.scopes,

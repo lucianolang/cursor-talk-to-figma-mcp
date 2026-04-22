@@ -518,6 +518,99 @@ server.tool(
   }
 );
 server.tool(
+  "get_node_paints",
+  "Retrieve the Paint[] definition (either fills or strokes) from a node in Figma. The returned array conforms to the Figma Plugin API Paint interface.",
+  {
+    nodeId: z.string().describe("The ID of the node whose paints to retrieve"),
+    paintsType: z.enum(["fills", "strokes"]).optional().default("fills").describe("Which paint list to return. Defaults to 'fills'.")
+  },
+  async ({ nodeId, paintsType }) => {
+    try {
+      const result = await sendCommandToFigma("get_node_paints", {
+        nodeId,
+        paintsType
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error getting node paints: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
+  "set_node_paints",
+  "Bind the fills or strokes of a node to a variable.",
+  {
+    nodeId: z.string().describe("The ID of the node to modify"),
+    paints: z.array(
+      z.object({
+        type: z.enum([
+          "SOLID",
+          "GRADIENT_LINEAR",
+          "GRADIENT_RADIAL",
+          "GRADIENT_ANGULAR",
+          "GRADIENT_DIAMOND",
+          "IMAGE",
+          "VIDEO",
+          "VARIABLE_ALIAS"
+        ]),
+        visible: z.boolean().optional(),
+        opacity: z.number().min(0).max(1).optional(),
+        blendMode: z.string().optional(),
+        boundVariables: z.object({
+          color: z.object({
+            type: z.string().optional(),
+            variableId: z.string().describe("The ID of the variable to bind to the color in the format like VariableID:3:4")
+          }).describe("Optional bound variables for the paint").optional()
+        }).catchall(z.unknown())
+      }).describe(
+        "Array of Paint objects. Each object must conform to the Paint interface: type, opacity, color, gradientStops, scaleMode, imageHash, etc."
+      )
+    ),
+    paintsType: z.enum(["fills", "strokes"]).optional().default("fills").describe("Whether to apply the paints to 'fills' (default) or 'strokes'.")
+  },
+  async ({ nodeId, paints, paintsType }) => {
+    try {
+      const result = await sendCommandToFigma("set_node_paints", {
+        nodeId,
+        paints,
+        paintsType: paintsType || "fills"
+      });
+      const typedResult = result;
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Updated ${paintsType || "fills"} on node "${typedResult.name}".`
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error setting node paints: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
   "move_node",
   "Move a node to a new position in Figma",
   {
@@ -794,6 +887,33 @@ server.tool(
           {
             type: "text",
             text: `Error getting local components: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
+  "get_team_components",
+  "Get all team components from the Figma document",
+  {},
+  async () => {
+    try {
+      const result = await sendCommandToFigma("get_team_components");
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error getting team components: ${error instanceof Error ? error.message : String(error)}`
           }
         ]
       };
@@ -2202,6 +2322,238 @@ This detailed process ensures you correctly interpret the reaction data, prepare
       ],
       description: "Strategy for converting Figma prototype reactions to connector lines using the output of 'get_reactions'"
     };
+  }
+);
+server.tool(
+  "list_variables",
+  "List all local variables in the current Figma document. Returns variable objects including collection metadata and mode values.",
+  {},
+  async () => {
+    try {
+      const result = await sendCommandToFigma("list_variables");
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing variables: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
+  "list_variables_in_collection",
+  "List local variables for a specific collection ID in the current Figma document.",
+  {
+    collectionId: z.string().describe("The collection ID to filter variables by")
+  },
+  async ({ collectionId }) => {
+    try {
+      const result = await sendCommandToFigma("list_variables_in_collection", { collectionId });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing collection variables: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
+  "find_variable_usages",
+  "Find sample usages of a variable across pages in the current Figma document.",
+  {
+    variableId: z.string().describe("The variable ID to inspect"),
+    sampleLimit: z.number().optional().describe("Maximum number of usage samples to return"),
+    pageId: z.string().optional().describe("Optional page ID to restrict the scan to"),
+    currentPageOnly: z.boolean().optional().describe("When true, only scan the currently open page")
+  },
+  async ({ variableId, sampleLimit, pageId, currentPageOnly }) => {
+    try {
+      const result = await sendCommandToFigma("find_variable_usages", { variableId, sampleLimit, pageId, currentPageOnly });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error finding variable usages: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
+  "get_node_variables",
+  "Get all variable bindings for a specific node. Returns an object mapping property types (e.g., 'fills', 'strokes', 'opacity', etc.) to variable binding info.",
+  {
+    nodeId: z.string().describe("The ID of the node to get variable bindings for")
+  },
+  async ({ nodeId }) => {
+    try {
+      const result = await sendCommandToFigma("get_node_variables", { nodeId });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `These are the variables for the node: ${JSON.stringify(result, null, 2)}, you may use the 'list_variables' tool to find the name of the variables.`
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error getting node variables: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
+  "create_variable",
+  "Create a new variable inside a collection. Returns the created variable object.",
+  {
+    name: z.string().describe("The name of the variable"),
+    resolvedType: z.enum(["FLOAT", "STRING", "BOOLEAN", "COLOR"]).describe("The type of the variable"),
+    description: z.string().optional().describe("Optional description for the variable"),
+    collectionId: z.string().describe("Collection ID to create the variable in you may use the 'list_collections' tool to find the collection ID")
+  },
+  async ({ name, resolvedType, description, collectionId }) => {
+    try {
+      const params = {
+        name,
+        resolvedType,
+        description,
+        collectionId
+      };
+      const result = await sendCommandToFigma("create_variable", params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `The variable has been created ${JSON.stringify(result, null, 2)} now you must 'set_variable_value' to assign the proper value to the variable. The variable will not be usable until it has a value assigned to it.`
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating variable: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
+  "set_variable_value",
+  "Set the value of a variable in the Figma document. Returns the updated variable object.",
+  {
+    variableId: z.string().describe("The ID of the variable to update"),
+    modeId: z.string().optional().describe("Optional mode ID for the variable, if applicable"),
+    value: z.object({
+      r: z.number().optional(),
+      g: z.number().optional(),
+      b: z.number().optional(),
+      a: z.number().optional()
+    }).optional().describe("The value for the variable"),
+    valueType: z.enum(["FLOAT", "STRING", "BOOLEAN", "COLOR"]).describe("The type of the value to set"),
+    variableReferenceId: z.string().optional().describe("Optional reference to another variable")
+  },
+  async ({ variableId, modeId, value, valueType, variableReferenceId }) => {
+    try {
+      const formattedValue = valueType === "COLOR" && value ? {
+        r: value.r || 0,
+        g: value.g || 0,
+        b: value.b || 0,
+        a: value.a || 1
+      } : value;
+      const result = await sendCommandToFigma("set_variable_value", {
+        variableId,
+        modeId,
+        value: formattedValue,
+        valueType,
+        variableReferenceId
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error setting variable value: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
+  "list_collections",
+  "List all variable collections in the Figma document, including modes and default mode metadata.",
+  {},
+  async () => {
+    try {
+      const result = await sendCommandToFigma("list_collections");
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing collections: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
   }
 );
 function connectToFigma(port = 3055) {

@@ -2753,7 +2753,7 @@ This detailed process ensures you correctly interpret the reaction data, prepare
 // Figma Variables: List all variables
 server.tool(
   "list_variables",
-  "List all local variables in the current Figma document. Returns an array of variable objects, including their id, name, type, and values.",
+  "List all local variables in the current Figma document. Returns variable objects including collection metadata and mode values.",
   {},
   async (): Promise<any> => {
     try {
@@ -2772,6 +2772,69 @@ server.tool(
           {
             type: "text",
             text: `Error listing variables: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+
+server.tool(
+  "list_variables_in_collection",
+  "List local variables for a specific collection ID in the current Figma document.",
+  {
+    collectionId: z.string().describe("The collection ID to filter variables by"),
+  },
+  async ({ collectionId }: { collectionId: string }): Promise<any> => {
+    try {
+      const result = await sendCommandToFigma("list_variables_in_collection", { collectionId });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          }
+        ]
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing collection variables: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+
+server.tool(
+  "find_variable_usages",
+  "Find sample usages of a variable across pages in the current Figma document.",
+  {
+    variableId: z.string().describe("The variable ID to inspect"),
+    sampleLimit: z.number().optional().describe("Maximum number of usage samples to return"),
+    pageId: z.string().optional().describe("Optional page ID to restrict the scan to"),
+    currentPageOnly: z.boolean().optional().describe("When true, only scan the currently open page"),
+  },
+  async ({ variableId, sampleLimit, pageId, currentPageOnly }: { variableId: string; sampleLimit?: number; pageId?: string; currentPageOnly?: boolean }): Promise<any> => {
+    try {
+      const result = await sendCommandToFigma("find_variable_usages", { variableId, sampleLimit, pageId, currentPageOnly });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          }
+        ]
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error finding variable usages: ${error instanceof Error ? error.message : String(error)}`
           }
         ]
       };
@@ -2909,7 +2972,7 @@ server.tool(
 
 server.tool(
   "list_collections",
-  "List all variable collections in the Figma document. Returns an array of collection objects, including their id, name, and type.",
+  "List all variable collections in the Figma document, including modes and default mode metadata.",
 
   {},
   async (): Promise<any> => {
@@ -2980,9 +3043,10 @@ type FigmaCommand =
   | "set_default_connector"
   | "create_connections"
   | "set_focus"
-  | "set_selections";
-  | "create_connections"
+  | "set_selections"
   | "list_variables"
+  | "list_variables_in_collection"
+  | "find_variable_usages"
   | "list_collections"
   | "get_node_variables"
   | "get_node_paints"
@@ -3140,6 +3204,8 @@ type CommandParams = {
   };
 
   list_variables: Record<string, never>;
+  list_variables_in_collection: { collectionId: string };
+  find_variable_usages: { variableId: string; sampleLimit?: number; pageId?: string; currentPageOnly?: boolean };
   list_collections: Record<string, never>;
   get_node_variables: { nodeId: string };
   get_node_paints: { nodeId: string };
@@ -3487,6 +3553,3 @@ main().catch(error => {
   logger.error(`Error starting FigmaMCP server: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);
 });
-
-
-

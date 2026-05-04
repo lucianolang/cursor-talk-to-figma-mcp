@@ -1,262 +1,229 @@
-# Talk to Figma MCP
+# Figma CLI Bridge
 
-This project implements a Model Context Protocol (MCP) integration between AI agent (Cursor, Claude Code) and Figma, allowing AI agent to communicate with Figma for reading designs and modifying them programmatically.
+Local CLI access to an open Figma file for AI agents and terminal workflows.
 
-https://github.com/user-attachments/assets/129a14d2-ed73-470f-9a4c-2240b2a4885c
+The CLI sends commands to a local WebSocket relay. The Figma plugin connects to the same relay and executes those commands inside Figma, where document APIs are available.
 
-## Project Structure
+```text
+Agent or terminal -> Figma CLI -> WebSocket relay -> Figma plugin -> Open Figma file
+```
 
-- `src/talk_to_figma_mcp/` - TypeScript MCP server for Figma integration
-- `src/cursor_mcp_plugin/` - Figma plugin for communicating with Cursor
-- `src/socket.ts` - WebSocket server that facilitates communication between the MCP server and Figma plugin
+## Requirements
 
-## How to use
+- Bun installed locally.
+- Figma desktop or browser app with access to development plugins.
+- This repository checked out on the same machine that can run the relay.
 
-1. Install Bun if you haven't already:
+## Install
+
+From the repository root:
 
 ```bash
-curl -fsSL https://bun.sh/install | bash
+bun install
+bun run build
 ```
 
-2. Run setup, this will also install MCP in your Cursor's active project
+`bun run build` creates the local runnable files:
+
+- `dist/figma.cjs`
+- `skills/figma-cli/scripts/figma.bundle.cjs`
+
+Those files are generated and ignored by git. Run `bun run build` again after changing CLI source.
+
+## Quick Start
+
+Use three separate contexts: one terminal for the relay, Figma for the plugin, and another terminal for commands.
+
+### 1. Start The Relay
+
+In terminal A:
 
 ```bash
-bun setup
+skills/figma-cli/scripts/figma serve --port 3055
 ```
 
-3. Start the Websocket server
+Leave this process running. A successful start prints a message like:
 
-```bash
-bun socket
+```text
+WebSocket server running on 127.0.0.1:3055
 ```
 
-4. **NEW** Install Figma plugin from [Figma community page](https://www.figma.com/community/plugin/1485687494525374295/cursor-talk-to-figma-mcp-plugin) or [install locally](#figma-plugin)
-
-## Quick Video Tutorial
-
-[Video Link](https://www.linkedin.com/posts/sonnylazuardi_just-wanted-to-share-my-latest-experiment-activity-7307821553654657024-yrh8)
-
-## Design Automation Example
-
-**Bulk text content replacement**
-
-Thanks to [@dusskapark](https://github.com/dusskapark) for contributing the bulk text replacement feature. Here is the [demo video](https://www.youtube.com/watch?v=j05gGT3xfCs).
-
-**Instance Override Propagation**
-Another contribution from [@dusskapark](https://github.com/dusskapark)
-Propagate component instance overrides from a source instance to multiple target instances with a single command. This feature dramatically reduces repetitive design work when working with component instances that need similar customizations. Check out our [demo video](https://youtu.be/uvuT8LByroI).
-
-## Manual Setup and Installation
-
-### MCP Server: Integration with Cursor
-
-Add the server to your Cursor MCP configuration in `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "TalkToFigma": {
-      "command": "bunx",
-      "args": ["cursor-talk-to-figma-mcp@latest"]
-    }
-  }
-}
-```
-
-### WebSocket Server
-
-Start the WebSocket server:
+You can also start the relay with:
 
 ```bash
 bun socket
 ```
 
-### Figma Plugin
-
-1. In Figma, go to Plugins > Development > New Plugin
-2. Choose "Link existing plugin"
-3. Select the `src/cursor_mcp_plugin/manifest.json` file
-4. The plugin should now be available in your Figma development plugins
-
-## Windows + WSL Guide
-
-1. Install bun via powershell
+Use `--host 0.0.0.0` only when Figma must reach the relay from outside localhost, such as Docker or some WSL setups:
 
 ```bash
-powershell -c "irm bun.sh/install.ps1|iex"
+skills/figma-cli/scripts/figma serve --port 3055 --host 0.0.0.0
 ```
 
-2. Uncomment the hostname `0.0.0.0` in `src/socket.ts`
+### 2. Link And Run The Figma Plugin
 
-```typescript
-// uncomment this to allow connections in windows wsl
-hostname: "0.0.0.0",
-```
+In Figma:
 
-3. Start the websocket
+1. Open the target Figma file.
+2. Go to `Plugins -> Development -> Link existing plugin`.
+3. Select `src/figma_plugin/manifest.json`.
+4. Run the development plugin named `Figma CLI Plugin`.
+5. In the plugin UI, connect to port `3055`.
+6. Copy the channel shown by the plugin.
+
+The channel is required for every CLI command. Do not invent one; use the exact channel displayed in Figma.
+
+The local development manifest intentionally has no published plugin `id`. Let Figma create the local development entry for your account.
+
+### 3. Run CLI Commands
+
+In terminal B, replace `abc123` with the channel from the plugin UI:
 
 ```bash
-bun socket
+skills/figma-cli/scripts/figma info --channel abc123
+skills/figma-cli/scripts/figma selection --channel abc123
+skills/figma-cli/scripts/figma read --channel abc123
 ```
 
-## Usage
+If another program will parse the output, add `--format json`:
 
-1. Start the WebSocket server
-2. Install the MCP server in Cursor
-3. Open Figma and run the Cursor MCP Plugin
-4. Connect the plugin to the WebSocket server by joining a channel using `join_channel`
-5. Use Cursor to communicate with Figma using the MCP tools
-
-## Local Development Setup
-
-To develop, update your mcp config to direct to your local directory.
-
-```json
-{
-  "mcpServers": {
-    "TalkToFigma": {
-      "command": "bun",
-      "args": ["/path-to-repo/src/talk_to_figma_mcp/server.ts"]
-    }
-  }
-}
+```bash
+skills/figma-cli/scripts/figma selection --channel abc123 --format json
 ```
 
-## MCP Tools
+## Common Commands
 
-The MCP server provides the following tools for interacting with Figma:
+Read document and selection:
 
-### Document & Selection
+```bash
+skills/figma-cli/scripts/figma info --channel abc123
+skills/figma-cli/scripts/figma selection --channel abc123
+skills/figma-cli/scripts/figma read --channel abc123
+```
 
-- `get_document_info` - Get information about the current Figma document
-- `get_selection` - Get information about the current selection
-- `read_my_design` - Get detailed node information about the current selection without parameters
-- `get_node_info` - Get detailed information about a specific node
-- `get_nodes_info` - Get detailed information about multiple nodes by providing an array of node IDs
-- `set_focus` - Set focus on a specific node by selecting it and scrolling viewport to it
-- `set_selections` - Set selection to multiple nodes and scroll viewport to show them
+Inspect specific nodes:
 
-### Annotations
+```bash
+skills/figma-cli/scripts/figma node "1:2" --channel abc123
+skills/figma-cli/scripts/figma nodes "1:2" "1:3" --channel abc123
+```
 
-- `get_annotations` - Get all annotations in the current document or specific node
-- `set_annotation` - Create or update an annotation with markdown support
-- `set_multiple_annotations` - Batch create/update multiple annotations efficiently
-- `scan_nodes_by_types` - Scan for nodes with specific types (useful for finding annotation targets)
+List variables and collections:
 
-### Prototyping & Connections
+```bash
+skills/figma-cli/scripts/figma variables --channel abc123
+skills/figma-cli/scripts/figma collections --channel abc123
+```
 
-- `get_reactions` - Get all prototype reactions from nodes with visual highlight animation
-- `set_default_connector` - Set a copied FigJam connector as the default connector style for creating connections (must be set before creating connections)
-- `create_connections` - Create FigJam connector lines between nodes, based on prototype flows or custom mapping
+Export a node:
 
-### Creating Elements
+```bash
+skills/figma-cli/scripts/figma export "1:2" --channel abc123 --image-format PNG --scale 2
+```
 
-- `create_rectangle` - Create a new rectangle with position, size, and optional name
-- `create_frame` - Create a new frame with position, size, and optional name
-- `create_text` - Create a new text node with customizable font properties
+Run any plugin command through the generic command entrypoint:
 
-### Modifying text content
+```bash
+skills/figma-cli/scripts/figma command set_text_content \
+  --channel abc123 \
+  --params '{"nodeId":"1:2","text":"Hello"}'
+```
 
-- `scan_text_nodes` - Scan text nodes with intelligent chunking for large designs
-- `set_text_content` - Set the text content of a single text node
-- `set_multiple_text_contents` - Batch update multiple text nodes efficiently
+Read parameters from a JSON file:
 
-### Auto Layout & Spacing
+```bash
+skills/figma-cli/scripts/figma command set_text_content \
+  --channel abc123 \
+  --params-file params.json
+```
 
-- `set_layout_mode` - Set the layout mode and wrap behavior of a frame (NONE, HORIZONTAL, VERTICAL)
-- `set_padding` - Set padding values for an auto-layout frame (top, right, bottom, left)
-- `set_axis_align` - Set primary and counter axis alignment for auto-layout frames
-- `set_layout_sizing` - Set horizontal and vertical sizing modes for auto-layout frames (FIXED, HUG, FILL)
-- `set_item_spacing` - Set distance between children in an auto-layout frame
+## Available CLI Aliases
 
-### Styling
+- `serve` starts the WebSocket relay.
+- `info` runs `get_document_info`.
+- `selection` runs `get_selection`.
+- `read` runs `read_my_design`.
+- `node <nodeId>` runs `get_node_info`.
+- `nodes <nodeId...>` runs `get_nodes_info`.
+- `variables` runs `list_variables`.
+- `collections` runs `list_collections`.
+- `export <nodeId>` runs `export_node_as_image`.
+- `command <command-name>` runs any supported plugin command with JSON params.
 
-- `set_fill_color` - Set the fill color of a node (RGBA)
-- `set_stroke_color` - Set the stroke color and weight of a node
-- `set_corner_radius` - Set the corner radius of a node with optional per-corner control
+For more command templates, see `skills/figma-cli/references/figma-commands.md`.
 
-### Layout & Organization
+## Safe Usage Rules
 
-- `move_node` - Move a node to a new position
-- `resize_node` - Resize a node with new dimensions
-- `delete_node` - Delete a node
-- `delete_multiple_nodes` - Delete multiple nodes at once efficiently
-- `clone_node` - Create a copy of an existing node with optional position offset
+Inspect before modifying:
 
-### Components & Styles
+```bash
+skills/figma-cli/scripts/figma selection --channel abc123
+skills/figma-cli/scripts/figma node "1:2" --channel abc123
+```
 
-- `get_styles` - Get information about local styles
-- `get_local_components` - Get information about local components
-- `create_component_instance` - Create an instance of a component
-- `get_instance_overrides` - Extract override properties from a selected component instance
-- `set_instance_overrides` - Apply extracted overrides to target instances
+Destructive commands require `--yes`:
 
-### Export & Advanced
+```bash
+skills/figma-cli/scripts/figma command delete_node \
+  --channel abc123 \
+  --params '{"nodeId":"1:2"}' \
+  --yes
+```
 
-- `export_node_as_image` - Export a node as an image (PNG, JPG, SVG, or PDF) - limited support on image currently returning base64 as text
+These commands are guarded:
 
-### Connection Management
+- `delete_node`
+- `delete_multiple_nodes`
+- `delete_variables`
 
-- `join_channel` - Join a specific channel to communicate with Figma
+Prefer batch commands for broad edits, such as `set_multiple_text_contents`, `delete_multiple_nodes`, and `set_multiple_annotations`.
 
-### MCP Prompts
+## Troubleshooting
 
-The MCP server includes several helper prompts to guide you through complex design tasks:
+If `skills/figma-cli/scripts/figma` cannot find `figma.bundle.cjs`, run:
 
-- `design_strategy` - Best practices for working with Figma designs
-- `read_design_strategy` - Best practices for reading Figma designs
-- `text_replacement_strategy` - Systematic approach for replacing text in Figma designs
-- `annotation_conversion_strategy` - Strategy for converting manual annotations to Figma's native annotations
-- `swap_overrides_instances` - Strategy for transferring overrides between component instances in Figma
-- `reaction_to_connector_strategy` - Strategy for converting Figma prototype reactions to connector lines using the output of 'get_reactions', and guiding the use 'create_connections' in sequence
+```bash
+bun run build
+```
+
+If CLI commands time out:
+
+- Confirm the relay process is still running.
+- Confirm the Figma plugin shows connected status.
+- Confirm the command uses the exact channel shown in the plugin.
+- Confirm the plugin is running in the Figma file you want to inspect.
+
+If Figma cannot connect to the relay:
+
+- Confirm the relay is listening on port `3055`.
+- Try restarting the relay and reconnecting the plugin.
+- Use `--host 0.0.0.0` only when localhost is not reachable from Figma in your environment.
+
+If a command fails with missing or invalid params:
+
+- Check the command templates in `skills/figma-cli/references/figma-commands.md`.
+- Use `--params '<json>'` for inline JSON.
+- Use `--params-file <path>` for larger payloads.
 
 ## Development
 
-### Building the Figma Plugin
+Project structure:
 
-1. Navigate to the Figma plugin directory:
+- `src/figma_cli/` contains the TypeScript CLI and relay implementation.
+- `src/socket.ts` is a compatibility relay entrypoint for `bun socket`.
+- `src/figma_plugin/` contains Figma plugin runtime files.
+- `skills/figma-cli/` contains the agent-facing skill wrapper and command reference.
 
-   ```
-   cd src/cursor_mcp_plugin
-   ```
+Useful commands:
 
-2. Edit code.js and ui.html
+```bash
+bun run build        # build dist/figma.cjs and the skill bundle
+bun run dev          # watch CLI source and rebuild dist
+bun socket           # start the relay through src/socket.ts
+bun run start --help # show built CLI help
+```
 
-## Best Practices
-
-When working with the Figma MCP:
-
-1. Always join a channel before sending commands
-2. Get document overview using `get_document_info` first
-3. Check current selection with `get_selection` before modifications
-4. Use appropriate creation tools based on needs:
-   - `create_frame` for containers
-   - `create_rectangle` for basic shapes
-   - `create_text` for text elements
-5. Verify changes using `get_node_info`
-6. Use component instances when possible for consistency
-7. Handle errors appropriately as all commands can throw exceptions
-8. For large designs:
-   - Use chunking parameters in `scan_text_nodes`
-   - Monitor progress through WebSocket updates
-   - Implement appropriate error handling
-9. For text operations:
-   - Use batch operations when possible
-   - Consider structural relationships
-   - Verify changes with targeted exports
-10. For converting legacy annotations:
-    - Scan text nodes to identify numbered markers and descriptions
-    - Use `scan_nodes_by_types` to find UI elements that annotations refer to
-    - Match markers with their target elements using path, name, or proximity
-    - Categorize annotations appropriately with `get_annotations`
-    - Create native annotations with `set_multiple_annotations` in batches
-    - Verify all annotations are properly linked to their targets
-    - Delete legacy annotation nodes after successful conversion
-11. Visualize prototype noodles as FigJam connectors:
-
-- Use `get_reactions` to extract prototype flows,
-- set a default connector with `set_default_connector`,
-- and generate connector lines with `create_connections` for clear visual flow mapping.
+The Figma plugin is not bundled. Edit `src/figma_plugin/code.js` and `src/figma_plugin/ui.html` directly.
 
 ## License
 

@@ -1,10 +1,30 @@
-// This is the main code file for the Cursor MCP Figma plugin
+// This is the main code file for the Figma CLI plugin
 // It handles Figma API commands
 
 // Plugin state
 const state = {
   serverPort: 3055, // Default port
 };
+
+// Cache variable metadata so broken aliases can retain names when the target was seen earlier.
+const variableMetadataCache = new Map();
+
+function rememberVariableMetadata(variable, collectionName = null) {
+  if (!variable || !variable.id) return;
+
+  const metadata = {
+    id: variable.id,
+    name: variable.name || null,
+    key: variable.key || null,
+    variableCollectionId: variable.variableCollectionId || null,
+    collectionName: collectionName || null,
+  };
+
+  variableMetadataCache.set(variable.id, metadata);
+  if (metadata.key) {
+    variableMetadataCache.set(`key:${metadata.key}`, metadata);
+  }
+}
 
 
 // Helper function for progress updates
@@ -237,6 +257,28 @@ async function handleCommand(command, params) {
       return await setFocus(params);
     case "set_selections":
       return await setSelections(params);
+    case "list_variables":
+      return await listVariables(params);
+    case "list_variables_in_collection":
+      return await listVariablesInCollection(params);
+    case "find_variable_usages":
+      return await findVariableUsages(params);
+    case "get_node_variables":
+      return await getNodeVariables(params);
+    case "find_broken_variable_aliases":
+      return await findBrokenVariableAliases(params);
+    case "create_variable":
+      return await createVariable(params);
+    case "set_variable_value":
+      return await setVariableValue(params);
+    case "delete_variables":
+      return await deleteVariables(params);
+    case "list_collections":
+      return await listCollections();
+    case "set_node_paints":
+      return await setNodePaints(params);
+    case "get_node_paints":
+      return await getNodePaints(params);
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -1465,6 +1507,747 @@ async function setTextContent(params) {
   } catch (error) {
     throw new Error(`Error setting text content: ${error.message}`);
   }
+}
+
+// === Figma Variables Support ===
+
+const variableCollectionCache = new Map();
+
+function isVariableAlias(value) {
+  return (
+    value &&
+    typeof value === "object" &&
+    value.type === "VARIABLE_ALIAS" &&
+    typeof value.id === "string"
+  );
+}
+
+async function getVariableCollectionCached(collectionId) {
+  if (
+    !collectionId ||
+    !figma.variables ||
+    !figma.variables.getVariableCollectionByIdAsync
+  ) {
+    return null;
+  }
+
+  if (variableCollectionCache.has(collectionId)) {
+    return variableCollectionCache.get(collectionId);
+  }
+
+  const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  variableCollectionCache.set(collectionId, collection || null);
+  return collection || null;
+}
+
+function getCollectionModes(collection) {
+  return Array.isArray(collection && collection.modes)
+    ? collection.modes.map((mode) => ({
+        modeId: mode.modeId,
+        name: mode.name,
+      }))
+    : [];
+}
+
+async function getTargetModeId(sourceVariable, sourceModeId, targetVariable) {
+  if (targetVariable.valuesByMode && targetVariable.valuesByMode[sourceModeId]) {
+    return sourceModeId;
+  }
+
+  const [sourceCollection, targetCollection] = await Promise.all([
+    getVariableCollectionCached(sourceVariable.variableCollectionId),
+    getVariableCollectionCached(targetVariable.variableCollectionId),
+  ]);
+
+  const sourceMode = getCollectionModes(sourceCollection).find(
+    (mode) => mode.modeId === sourceModeId
+  );
+  const sourceModeName = sourceMode ? sourceMode.name : null;
+
+  if (sourceModeName) {
+    const matchingTargetMode = getCollectionModes(targetCollection).find(
+      (mode) =>
+        mode.name.trim().toLowerCase() === sourceModeName.trim().toLowerCase() &&
+        targetVariable.valuesByMode &&
+        targetVariable.valuesByMode[mode.modeId]
+    );
+
+    if (matchingTargetMode) {
+      return matchingTargetMode.modeId;
+    }
+  }
+
+  if (
+    targetCollection &&
+    targetCollection.defaultModeId &&
+    targetVariable.valuesByMode &&
+    targetVariable.valuesByMode[targetCollection.defaultModeId]
+  ) {
+    return targetCollection.defaultModeId;
+  }
+
+  const targetModeIds = Object.keys(targetVariable.valuesByMode || {});
+  return targetModeIds[0] || sourceModeId;
+}
+
+async function resolveVariableValue(variable, modeId, visited = new Set()) {
+  const visitKey = `${variable.id}:${modeId}`;
+  if (visited.has(visitKey)) {
+    return {
+      resolvedValue: null,
+      immediateAlias: null,
+      aliasChain: [],
+      error: "Circular variable alias detected",
+    };
+  }
+
+  visited.add(visitKey);
+  const rawValue = variable.valuesByMode ? variable.valuesByMode[modeId] : undefined;
+
+  if (!isVariableAlias(rawValue)) {
+    return {
+      resolvedValue: rawValue === undefined ? null : rawValue,
+      immediateAlias: null,
+      aliasChain: [],
+      targetModeId: modeId,
+    };
+  }
+
+  const refVariable = await figma.variables.getVariableByIdAsync(rawValue.id);
+  const immediateAlias = refVariable
+    ? {
+        id: refVariable.id,
+        name: refVariable.name,
+        variableCollectionId: refVariable.variableCollectionId,
+      }
+    : {
+        id: rawValue.id,
+        name: null,
+        variableCollectionId: null,
+      };
+
+  if (!refVariable) {
+    return {
+      resolvedValue: rawValue,
+      immediateAlias,
+      aliasChain: [immediateAlias],
+      error: `Unable to resolve referenced variable: ${rawValue.id}`,
+      targetModeId: modeId,
+    };
+  }
+
+  const targetModeId = await getTargetModeId(variable, modeId, refVariable);
+  const nested = await resolveVariableValue(refVariable, targetModeId, visited);
+  const aliasChain = [immediateAlias];
+  if (nested.aliasChain && nested.aliasChain.length > 0) {
+    for (const aliasEntry of nested.aliasChain) {
+      aliasChain.push(aliasEntry);
+    }
+  }
+
+  return {
+    resolvedValue: nested.resolvedValue === undefined || nested.resolvedValue === null ? rawValue : nested.resolvedValue,
+    immediateAlias,
+    aliasChain,
+    error: nested.error,
+    targetModeId,
+  };
+}
+
+async function serializeVariable(variable, options = {}) {
+  const collection = await getVariableCollectionCached(variable.variableCollectionId);
+  rememberVariableMetadata(variable, collection && collection.name ? collection.name : null);
+  const serialized = {
+    id: variable.id,
+    name: variable.name,
+    key: variable.key,
+    variableCollectionId: variable.variableCollectionId,
+    collectionName: collection && collection.name ? collection.name : null,
+    resolvedType: variable.resolvedType,
+    valuesByMode: variable.valuesByMode,
+    scopes: variable.scopes,
+    description: variable.description,
+  };
+
+  if (!options.resolveValues) {
+    return serialized;
+  }
+
+  const resolvedValuesByMode = {};
+  const aliasInfoByMode = {};
+  const resolutionErrorsByMode = {};
+
+  for (const modeId of Object.keys(variable.valuesByMode || {})) {
+    const resolution = await resolveVariableValue(variable, modeId);
+    resolvedValuesByMode[modeId] = resolution.resolvedValue;
+
+    if (resolution.immediateAlias) {
+      aliasInfoByMode[modeId] = {
+        id: resolution.immediateAlias.id,
+        name: resolution.immediateAlias.name,
+        variableCollectionId: resolution.immediateAlias.variableCollectionId,
+        targetModeId: resolution.targetModeId,
+        aliasChain: resolution.aliasChain,
+      };
+    }
+
+    if (resolution.error) {
+      resolutionErrorsByMode[modeId] = resolution.error;
+    }
+  }
+
+  serialized.resolvedValuesByMode = resolvedValuesByMode;
+  if (Object.keys(aliasInfoByMode).length > 0) {
+    serialized.aliasInfoByMode = aliasInfoByMode;
+  }
+  if (Object.keys(resolutionErrorsByMode).length > 0) {
+    serialized.resolutionErrorsByMode = resolutionErrorsByMode;
+  }
+
+  return serialized;
+}
+
+// List all local variables in the document
+async function listVariables(params) {
+  if (!figma.variables || !figma.variables.getLocalVariablesAsync) {
+    throw new Error("Figma Variables API not available");
+  }
+  const resolveValues = Boolean(params && params.resolveValues);
+  const variables = await figma.variables.getLocalVariablesAsync();
+  return await Promise.all(
+    variables.map((variable) => serializeVariable(variable, { resolveValues }))
+  );
+}
+
+async function listVariablesInCollection(params) {
+  const { collectionId, resolveValues } = params || {};
+  if (!collectionId) {
+    throw new Error("Missing collectionId parameter");
+  }
+  if (!figma.variables || !figma.variables.getLocalVariablesAsync) {
+    throw new Error("Figma Variables API not available");
+  }
+  const variables = await figma.variables.getLocalVariablesAsync();
+  const scopedVariables = variables.filter(
+    (variable) => variable.variableCollectionId === collectionId
+  );
+  return await Promise.all(
+    scopedVariables.map((variable) => serializeVariable(variable, { resolveValues: Boolean(resolveValues) }))
+  );
+}
+
+function nodeUsesVariable(node, variableId) {
+  const matches = [];
+
+  if (node.boundVariables) {
+    for (const [propertyName, binding] of Object.entries(node.boundVariables)) {
+      if (!binding) continue;
+
+      if (Array.isArray(binding)) {
+        for (const item of binding) {
+          if (item && item.id === variableId) {
+            matches.push(`boundVariables.${propertyName}`);
+          }
+          if (item && item.variableId === variableId) {
+            matches.push(`boundVariables.${propertyName}`);
+          }
+        }
+        continue;
+      }
+
+      if (binding.id === variableId || binding.variableId === variableId) {
+        matches.push(`boundVariables.${propertyName}`);
+      }
+    }
+  }
+
+  const paintGroups = [
+    { name: "fills", paints: node.fills },
+    { name: "strokes", paints: node.strokes },
+  ];
+
+  for (const group of paintGroups) {
+    if (!Array.isArray(group.paints)) continue;
+    for (let index = 0; index < group.paints.length; index += 1) {
+      const paint = group.paints[index];
+      if (!paint || !paint.boundVariables) continue;
+
+      for (const [bindingName, binding] of Object.entries(paint.boundVariables)) {
+        if (!binding) continue;
+        if (binding.id === variableId || binding.variableId === variableId) {
+          matches.push(`${group.name}[${index}].boundVariables.${bindingName}`);
+        }
+      }
+    }
+  }
+
+  return matches;
+}
+
+function getNodePath(node) {
+  const path = [];
+  let current = node;
+
+  while (current) {
+    path.unshift(current.name || `Unnamed ${current.type}`);
+    current = current.parent;
+  }
+
+  return path;
+}
+
+function getUsageContext(node) {
+  let current = node.parent;
+  let component = null;
+  let frame = null;
+
+  while (current) {
+    if (!component && (current.type === "COMPONENT" || current.type === "COMPONENT_SET" || current.type === "INSTANCE")) {
+      component = {
+        id: current.id,
+        name: current.name,
+        type: current.type,
+      };
+    }
+
+    if (!frame && (current.type === "FRAME" || current.type === "SECTION")) {
+      frame = {
+        id: current.id,
+        name: current.name,
+        type: current.type,
+      };
+    }
+
+    current = current.parent;
+  }
+
+  return {
+    component,
+    frame,
+  };
+}
+
+async function findVariableUsages(params) {
+  const { variableId, sampleLimit = 25, pageId, currentPageOnly = false } = params || {};
+
+  if (!variableId) {
+    throw new Error("Missing variableId parameter");
+  }
+
+  const variable = await figma.variables.getVariableByIdAsync(variableId);
+  if (!variable) {
+    throw new Error(`Variable not found: ${variableId}`);
+  }
+
+  const usages = [];
+  async function collectUsages(node, page) {
+    if (usages.length >= sampleLimit) return;
+
+    const usageProperties = nodeUsesVariable(node, variableId);
+    if (usageProperties.length > 0) {
+      usages.push({
+        page: {
+          id: page.id,
+          name: page.name,
+        },
+        node: {
+          id: node.id,
+          name: node.name || `Unnamed ${node.type}`,
+          type: node.type,
+        },
+        path: getNodePath(node),
+        usageProperties,
+        context: getUsageContext(node),
+      });
+    }
+
+    if (usages.length >= sampleLimit) return;
+
+    if ("children" in node) {
+      for (const child of node.children) {
+        await collectUsages(child, page);
+        if (usages.length >= sampleLimit) return;
+      }
+    }
+  }
+
+  let pages = [];
+  if (currentPageOnly) {
+    pages = [figma.currentPage];
+  } else if (pageId) {
+    const matchedPage = figma.root.children.find((candidate) => candidate.id === pageId);
+    if (!matchedPage) {
+      throw new Error(`Page not found: ${pageId}`);
+    }
+    pages = [matchedPage];
+  } else {
+    pages = figma.root.children;
+  }
+
+  for (const page of pages) {
+    if (usages.length >= sampleLimit) break;
+    await page.loadAsync();
+    for (const child of page.children) {
+      await collectUsages(child, page);
+      if (usages.length >= sampleLimit) break;
+    }
+  }
+
+  return {
+    variable: {
+      id: variable.id,
+      name: variable.name,
+      variableCollectionId: variable.variableCollectionId,
+    },
+    scanScope: currentPageOnly ? "current-page" : pageId ? "single-page" : "document",
+    usageCount: usages.length,
+    sampleLimit,
+    usages,
+  };
+}
+
+// Get variable bindings for a node
+async function getNodeVariables(params) {
+  const { nodeId } = params || {};
+  if (!nodeId) throw new Error("Missing nodeId parameter");
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) throw new Error(`Node not found: ${nodeId}`);
+  if (!node.boundVariables) return { nodeId, boundVariables: null };
+  return { nodeId, boundVariables: node.boundVariables };
+}
+
+async function findBrokenVariableAliases(params) {
+  const { collectionId } = params || {};
+  if (!collectionId) throw new Error("Missing collectionId parameter");
+  if (!figma.variables || !figma.variables.getLocalVariablesAsync) {
+    throw new Error("Figma Variables API not available");
+  }
+
+  const variables = await figma.variables.getLocalVariablesAsync();
+  const variableIds = new Set(variables.map((variable) => variable.id));
+  const broken = [];
+
+  for (const variable of variables) {
+    if (variable.variableCollectionId !== collectionId) continue;
+    const collection = await getVariableCollectionCached(variable.variableCollectionId);
+    rememberVariableMetadata(variable, collection && collection.name ? collection.name : null);
+
+    for (const [modeId, value] of Object.entries(variable.valuesByMode || {})) {
+      if (!value || typeof value !== "object" || value.type !== "VARIABLE_ALIAS") continue;
+      if (variableIds.has(value.id)) continue;
+
+      const cachedReference = variableMetadataCache.get(value.id) || null;
+
+      broken.push({
+        id: variable.id,
+        name: variable.name,
+        variableCollectionId: variable.variableCollectionId,
+        collectionName: collection && collection.name ? collection.name : null,
+        resolvedType: variable.resolvedType,
+        modeId,
+        missingReferenceId: value.id,
+        missingReferenceName: cachedReference && cachedReference.name ? cachedReference.name : null,
+        missingReferenceKey: cachedReference && cachedReference.key ? cachedReference.key : null,
+        missingReferenceCollectionId: cachedReference && cachedReference.variableCollectionId ? cachedReference.variableCollectionId : null,
+        missingReferenceCollectionName: cachedReference && cachedReference.collectionName ? cachedReference.collectionName : null,
+      });
+    }
+  }
+
+  return {
+    collectionId,
+    brokenCount: broken.length,
+    broken,
+  };
+}
+
+async function listCollections(params) { 
+  if (!figma.variables || !figma.variables.getLocalVariableCollectionsAsync) {
+    throw new Error("Figma Variables API not available");
+  }
+  const collections = await figma.variables.getLocalVariableCollectionsAsync();
+  return collections.map(c => ({
+    id: c.id,
+    name: c.name,
+    key: c.key,
+    description: c.description,
+    defaultModeId: c.defaultModeId,
+    modes: getCollectionModes(c)
+  }));
+}
+
+/**
+ * Creates a new variable in the Figma document.
+ * @param {Object} params
+ * @param {string} params.name - The name of the variable
+ * @param {"FLOAT"|"STRING"|"BOOLEAN"|"COLOR"} params.resolvedType - The type of the variable
+ * @param {string} [params.description] - Optional description
+ * @param {string} collectionId - The Figma collection to contain the variable.
+ * @returns {Promise<Object>} - The created variable object
+ */
+async function createVariable(params) {
+  if (!figma.variables || !figma.variables.createVariable) {
+    throw new Error("Figma Variables API not available");
+  }
+  const { name, resolvedType, description, collectionId } = params || {};
+  if (!name || !resolvedType) {
+    throw new Error("Missing required parameters: name, resolvedType");
+  }
+  const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  if (!collection) {
+    throw new Error(`Variable collection not found: ${collectionId}`);
+  }
+  const variable = figma.variables.createVariable(name, collection, resolvedType);
+  if (description) variable.description = description;
+  return {
+    id: variable.id,
+    name: variable.name,
+    key: variable.key,
+    variableCollectionId: variable.variableCollectionId,
+    resolvedType: variable.resolvedType,
+    valuesByMode: variable.valuesByMode,
+    scopes: variable.scopes,
+    description: variable.description
+  };
+}
+
+/**
+ * Sets a value for a Figma variable in a specific mode.
+ * Supports setting direct values (FLOAT, STRING, BOOLEAN, COLOR) or referencing another variable (alias).
+ * 
+ * @async
+ * @function setVariableValue
+ * @param {Object} params - Parameters for setting the variable value.
+ * @param {string} params.variableId - The ID of the variable to update.
+ * @param {string} params.modeId - The ID of the mode to set the value for.
+ * @param {*} params.value - The value to set. For COLOR, should be an object { r, g, b, a }.
+ * @param {"FLOAT"|"STRING"|"BOOLEAN"|"COLOR"} params.valueType - The type of the value to set.
+ * @param {string} [params.variableReferenceId] - Optional. If provided, sets the value as an alias to another variable.
+ * @returns {Promise<Object>} Result object with success status and details of the operation.
+ * @throws {Error} If required parameters are missing, or if the Figma Variables API is not available, or if the value is invalid.
+  */
+
+async function setVariableValue(params) {
+  const { variableId, modeId, value, valueType, variableReferenceId } = params || {};
+  if (!variableId) {
+    throw new Error("Missing variableId or parameter");
+  }
+  if (!figma.variables || !figma.variables.getVariableByIdAsync) {
+    throw new Error("Figma Variables API not available");
+  }
+  const variable = await figma.variables.getVariableByIdAsync(variableId);
+  if (!variable) throw new Error(`Variable not found: ${variableId}`);
+
+  let mode = modeId || Object.keys(variable.valuesByMode)[0];
+
+  // If variableReferenceId is provided, set value as a reference to another variable
+  if (variableReferenceId) {
+    const refVariable = await figma.variables.getVariableByIdAsync(variableReferenceId);
+    if (!refVariable) throw new Error(`Reference variable not found: ${variableReferenceId}`);
+    variable.setValueForMode(mode, { type: "VARIABLE_ALIAS", id: variableReferenceId });
+    return { success: true, variableId, mode, value: { type: "VARIABLE_ALIAS", id: variableReferenceId } };
+  }
+
+  // Otherwise, set the value directly based on valueType
+  if (valueType === "COLOR") {
+    // value should be { r, g, b, a }
+    if (!value || typeof value !== "object" || value.r === undefined || value.g === undefined || value.b === undefined) {
+      throw new Error("Invalid color value");
+    }
+    variable.setValueForMode(mode, {
+      r: Number(value.r),
+      g: Number(value.g),
+      b: Number(value.b),
+      a: Number(value.a) || 1
+    });
+  } else if (valueType === "FLOAT") {
+    variable.setValueForMode(mode, Number(value));
+  } else if (valueType === "STRING") {
+    variable.setValueForMode(mode, String(value));
+  } else if (valueType === "BOOLEAN") {
+    variable.setValueForMode(mode, Boolean(value));
+  } else {
+    throw new Error("Unsupported valueType");
+  }
+  return { success: true, variableId, mode, value };
+}
+
+async function deleteVariables(params) {
+  const { variableIds } = params || {};
+  if (!Array.isArray(variableIds) || variableIds.length === 0) {
+    throw new Error("Missing variableIds parameter");
+  }
+  if (!figma.variables || !figma.variables.getVariableByIdAsync) {
+    throw new Error("Figma Variables API not available");
+  }
+
+  const deleted = [];
+  const failed = [];
+
+  for (const variableId of variableIds) {
+    try {
+      const variable = await figma.variables.getVariableByIdAsync(variableId);
+      if (!variable) {
+        failed.push({ variableId, error: `Variable not found: ${variableId}` });
+        continue;
+      }
+      if (typeof variable.remove !== "function") {
+        failed.push({ variableId, name: variable.name, error: "Variable removal is not supported by this Figma runtime" });
+        continue;
+      }
+
+      rememberVariableMetadata(variable);
+      const snapshot = {
+        variableId: variable.id,
+        name: variable.name,
+        variableCollectionId: variable.variableCollectionId,
+      };
+      variable.remove();
+      deleted.push(snapshot);
+    } catch (error) {
+      failed.push({
+        variableId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return {
+    success: failed.length === 0,
+    deletedCount: deleted.length,
+    failedCount: failed.length,
+    deleted,
+    failed,
+  };
+}
+
+// --- setNodePaints: Set fills or strokes on a node ---
+async function setNodePaints(params) {
+  const { nodeId, paints, paintsType = "fills" } = params || {};
+  if (!nodeId) throw new Error("Missing nodeId parameter");
+  if (!Array.isArray(paints)) throw new Error("'paints' must be an array");
+  if (paintsType !== "fills" && paintsType !== "strokes") throw new Error("paintsType must be 'fills' or 'strokes'");
+
+  // Get target node
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) throw new Error(`Node not found with ID: ${nodeId}`);
+  if (!(paintsType in node)) throw new Error(`Node does not support ${paintsType}: ${nodeId}`);
+
+  // Validate and format each paint object asynchronously
+  const validatedPaints = await Promise.all(paints.map(async paint => {
+    // Validate paint type
+    if (!paint.type || !['SOLID', 'GRADIENT_LINEAR', 'GRADIENT_RADIAL', 
+        'GRADIENT_ANGULAR', 'GRADIENT_DIAMOND', 'IMAGE', 'VIDEO'].includes(paint.type)) {
+      throw new Error(`Invalid paint type: ${paint.type}`);
+    }
+
+    // Format based on paint type
+    let formattedPaint;
+    switch (paint.type) {
+      case 'SOLID':
+        if (!paint.color && paint.boundVariables && paint.boundVariables.color) {
+          // get variable color and return as formatted paint
+          const variableColor = await figma.variables.getVariableByIdAsync(paint.boundVariables.color.variableId);
+          
+          //get value from variable for default mode 
+          const variableColorValue = Object.values(variableColor.valuesByMode)[0];
+          formattedPaint = {
+            type: 'SOLID',
+            color: {
+              r: Number(variableColorValue.r || 0),
+              g: Number(variableColorValue.g || 0),
+              b: Number(variableColorValue.b || 0)
+            },
+            opacity: Number(paint.opacity || 1)
+          };
+        } else {
+          formattedPaint = {
+            type: 'SOLID',
+            color: {
+              r: Number(paint.color.r || 0),
+              g: Number(paint.color.g || 0),
+              b: Number(paint.color.b || 0)
+            },
+            opacity: Number(paint.opacity || 1)
+          };
+        }
+        break;
+
+      case 'GRADIENT_LINEAR':
+      case 'GRADIENT_RADIAL':
+      case 'GRADIENT_ANGULAR':
+      case 'GRADIENT_DIAMOND':
+        if (!paint.gradientStops || !Array.isArray(paint.gradientStops)) {
+          throw new Error('Gradient requires gradientStops array');
+        }
+        formattedPaint = {
+          type: paint.type,
+          gradientStops: paint.gradientStops.map(stop => ({
+            position: Number(stop.position || 0),
+            color: {
+              r: Number(stop.color.r || 0),
+              g: Number(stop.color.g || 0),
+              b: Number(stop.color.b || 0),
+              a: Number(stop.color.a || 1)
+            }
+          })),
+          gradientTransform: paint.gradientTransform || [[1,0,0], [0,1,0]]
+        };
+        break;
+
+      case 'IMAGE':
+        formattedPaint = {
+          type: 'IMAGE',
+          scaleMode: paint.scaleMode || 'FILL',
+          imageHash: paint.imageHash,
+          opacity: Number(paint.opacity || 1)
+        };
+        break;
+
+      default:
+        throw new Error(`Unsupported paint type: ${paint.type}`);
+    }
+
+    if (paint.boundVariables && paint.boundVariables.color) {
+      const variableColor = await figma.variables.getVariableByIdAsync(paint.boundVariables.color.variableId);
+      try {
+        return figma.variables.setBoundVariableForPaint(formattedPaint, 'color', variableColor);
+      } catch (error) {
+        console.error(`Error setting bound variable for paint: ${error.message}`);
+        throw new Error(`Error setting ${formattedPaint}: ${error.message}`);
+      }
+    } else {
+      return formattedPaint;
+    }
+  }));
+
+  // Apply validated paints
+  try {
+    node[paintsType] = validatedPaints;
+  } catch (error) {
+    throw new Error(`Error setting ${paintsType}: ${error.message}, ${JSON.stringify(validatedPaints, null, 2)}`);
+  }
+
+  return {
+    id: node.id,
+    name: node.name,
+    [paintsType]: node[paintsType]
+  };
+}
+
+// --- getNodePaints: Get fills or strokes from a node ---
+async function getNodePaints(params) {
+  const { nodeId, paintsType = "fills" } = params || {};
+  if (!nodeId) throw new Error("Missing nodeId parameter");
+  if (paintsType !== "fills" && paintsType !== "strokes") throw new Error("paintsType must be 'fills' or 'strokes'");
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) throw new Error(`Node not found with ID: ${nodeId}`);
+  if (!(paintsType in node)) throw new Error(`Node does not support ${paintsType}: ${nodeId}`);
+  return {
+    id: node.id,
+    name: node.name,
+    [paintsType]: node[paintsType],
+  };
 }
 
 // Initialize settings on load
@@ -3080,7 +3863,7 @@ async function getInstanceOverrides(instanceNode = null) {
       return { success: false, message: "Failed to get main component" };
     }
 
-    // return data to MCP server
+    // return data to CLI client
     const returnData = {
       success: true,
       message: `Got component information from "${sourceInstance.name}" for overrides.length: ${overrides.length}`,
@@ -3089,7 +3872,7 @@ async function getInstanceOverrides(instanceNode = null) {
       overridesCount: overrides.length
     };
 
-    console.log("Data to return to MCP server:", returnData);
+    console.log("Data to return to CLI client:", returnData);
     figma.notify(`Got component information from "${sourceInstance.name}"`);
 
     return returnData;

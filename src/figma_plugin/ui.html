@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Cursor MCP Plugin</title>
+    <title>Figma CLI Plugin</title>
     <style>
       body {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -257,8 +257,8 @@
     <div class="container">
       <div class="header">
         <div class="header-text">
-          <h1>Talk To Figma MCP Plugin</h1>
-          <p>Connect Figma to Cursor AI using MCP</p>
+          <h1>Figma CLI Plugin</h1>
+          <p>Connect Figma to local AI agent CLIs</p>
         </div>
       </div>
 
@@ -289,17 +289,16 @@
         </div>
 
         <div id="connection-status" class="status disconnected">
-          Not connected to Cursor MCP server
+          Not connected to Figma CLI relay
         </div>
 
-        <div id="mcp-config" class="section hidden">
-          <h2>MCP Configuration</h2>
+        <div id="cli-example" class="section hidden">
+          <h2>CLI Example</h2>
           <p>
-            Copy this configuration to your <code>mcp.json</code> file in
-            Cursor:
+            Use this command from the bundled skill wrapper:
           </p>
           <textarea
-            id="mcp-json"
+            id="cli-command"
             rows="5"
             readonly
             style="
@@ -355,23 +354,18 @@
 
       <div id="content-about" class="tab-content">
         <div class="section">
-          <h2>About Talk To Figma Plugin</h2>
+          <h2>About Figma CLI Plugin</h2>
           <p>
-            This plugin allows Cursor AI to communicate with Figma, enabling
+            This plugin allows local AI agent CLIs to communicate with Figma, enabling
             AI-assisted design operations.
-            <a
-              class="link"
-              onclick="window.open(`https://github.com/grab/cursor-talk-to-figma-mcp`, '_blank')"
-              >Github</a
-            >
           </p>
           <p>Version: 1.1.0</p>
 
           <h2>How to Use</h2>
           <ol>
-            <li>Make sure the MCP server is running in Cursor</li>
-            <li>Connect to the server using the port number (default: 3055)</li>
-            <li>Once connected, you can interact with Figma through Cursor</li>
+            <li>Start the local relay with <code>figma serve --port 3055</code></li>
+            <li>Connect to the relay using the port number (default: 3055)</li>
+            <li>Use the displayed channel in CLI commands</li>
           </ol>
         </div>
       </div>
@@ -410,12 +404,12 @@
         let statusMessage =
           message ||
           (isConnected
-            ? "Connected to Cursor MCP server"
-            : "Not connected to Cursor MCP server");
+            ? "Connected to Figma CLI relay"
+            : "Not connected to Figma CLI relay");
 
         // Add instructions for localhost when disconnected
         if (!isConnected) {
-          statusMessage += `<br><br>Run this in your terminal, then connect<br><code>bunx cursor-talk-to-figma-socket</code>`;
+          statusMessage += `<br><br>Run this in your terminal, then connect<br><code>figma-cli serve --port 3055</code>`;
         }
 
         connectionStatus.innerHTML = statusMessage;
@@ -428,13 +422,13 @@
         connectButton.className = isConnected ? "secondary" : "primary";
         portInput.disabled = isConnected;
 
-        // Show/hide MCP config section
-        const mcpConfig = document.getElementById("mcp-config");
-        mcpConfig.className = `section ${isConnected ? "" : "hidden"}`;
+        // Show/hide CLI example section
+        const cliExample = document.getElementById("cli-example");
+        cliExample.className = `section ${isConnected ? "" : "hidden"}`;
 
-        // Update MCP config text when showing
+        // Update CLI example text when showing
         if (isConnected) {
-          updateMcpConfig();
+          updateCliExample();
         }
       }
 
@@ -486,7 +480,7 @@
                     {
                       pluginMessage: {
                         type: "notify",
-                        message: `Connected to Cursor MCP server on port ${port} in channel: ${channelName}`,
+                        message: `Connected to Figma CLI relay on port ${port} in channel: ${channelName}`,
                       },
                     },
                     "*"
@@ -805,7 +799,7 @@
 
       // Add this to the script section, after all the other event listeners
       document.getElementById("btn-copy").addEventListener("click", () => {
-        const textarea = document.getElementById("mcp-json");
+        const textarea = document.getElementById("cli-command");
         textarea.select();
         document.execCommand("copy");
         const button = document.getElementById("btn-copy");
@@ -816,21 +810,9 @@
       });
 
       // Add this function to the script section
-      function updateMcpConfig() {
-        const mcpConfig = {
-          mcpServers: {
-            TalkToFigma: {
-              command: "bunx",
-              args: ["cursor-talk-to-figma-mcp@latest"],
-            },
-          },
-        };
-
-        document.getElementById("mcp-json").value = JSON.stringify(
-          mcpConfig,
-          null,
-          2
-        );
+      function updateCliExample() {
+        document.getElementById("cli-command").value =
+          `scripts/figma info --channel ${state.channel}`;
       }
     </script>
   </body>

@@ -1,8 +1,10 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/talk_to_figma_mcp/server.ts'],
-  format: ['cjs', 'esm'],
+  entry: {
+    figma: 'src/figma_cli/cli.ts',
+  },
+  format: ['cjs'],
   dts: true,
   clean: true,
   outDir: 'dist',
@@ -11,4 +13,7 @@ export default defineConfig({
   minify: false,
   splitting: false,
   bundle: true,
-}); 
+  noExternal: ['ws'],
+  platform: 'node',
+  outExtension: () => ({ js: '.cjs' }),
+});

@@ -1,22 +1,23 @@
 {
-  "name": "cursor-talk-to-figma-mcp",
-  "description": "Cursor Talk to Figma MCP",
+  "name": "figma-plugin-cli",
+  "description": "Figma CLI bridge for AI agents",
   "version": "0.3.6",
-  "module": "dist/server.js",
-  "main": "dist/server.js",
+  "module": "dist/figma.cjs",
+  "main": "dist/figma.cjs",
   "bin": {
-    "cursor-talk-to-figma-mcp": "dist/server.js"
+    "figma-cli": "dist/figma.cjs"
   },
   "files": [
     "dist",
+    "skills",
     "README.md"
   ],
   "type": "module",
   "scripts": {
-    "start": "bun run dist/server.js",
+    "start": "node dist/figma.cjs",
     "socket": "bun run src/socket.ts",
     "setup": "./scripts/setup.sh",
-    "build": "tsup",
+    "build": "tsup && cp dist/figma.cjs skills/figma-cli/scripts/figma.bundle.cjs",
     "build:watch": "tsup --watch",
     "dev": "bun run build:watch",
     "pub:release": "bun run build && npm publish"
@@ -28,9 +29,6 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.13.1",
-    "uuid": "latest",
-    "ws": "latest",
-    "zod": "^3.25.0"
+    "ws": "latest"
   }
 }

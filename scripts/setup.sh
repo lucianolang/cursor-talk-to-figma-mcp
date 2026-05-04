@@ -1,23 +1,8 @@
 #!/bin/bash
 
-MCP_CONFIG='{
-  "mcpServers": {
-    "TalkToFigma": {
-      "command": "bunx",
-      "args": [
-        "cursor-talk-to-figma-mcp@latest"
-      ]
-    }
-  }
-}'
-
 bun install
+bun run build
 
-# Cursor: write .cursor/mcp.json
-mkdir -p .cursor
-echo "$MCP_CONFIG" > .cursor/mcp.json
-echo "✓ Cursor MCP config written to .cursor/mcp.json"
-
-# Claude Code: write .mcp.json in project root
-echo "$MCP_CONFIG" > .mcp.json
-echo "✓ Claude Code MCP config written to .mcp.json"
+echo "✓ Figma CLI built at skills/figma-cli/scripts/figma"
+echo "✓ Start the relay with: skills/figma-cli/scripts/figma serve --port 3055"
+echo "✓ Run the Figma plugin and use the displayed channel with CLI commands"

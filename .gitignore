@@ -1,5 +1,5 @@
 node_modules/
-.cursor/
 .env
 dist/
+skills/figma-cli/scripts/figma.bundle.cjs
 docs/

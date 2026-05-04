@@ -1,4 +1,4 @@
-// This is the main code file for the Cursor MCP Figma plugin
+// This is the main code file for the Figma CLI plugin
 // It handles Figma API commands
 
 // Plugin state
@@ -3863,7 +3863,7 @@ async function getInstanceOverrides(instanceNode = null) {
       return { success: false, message: "Failed to get main component" };
     }
 
-    // return data to MCP server
+    // return data to CLI client
     const returnData = {
       success: true,
       message: `Got component information from "${sourceInstance.name}" for overrides.length: ${overrides.length}`,
@@ -3872,7 +3872,7 @@ async function getInstanceOverrides(instanceNode = null) {
       overridesCount: overrides.length
     };
 
-    console.log("Data to return to MCP server:", returnData);
+    console.log("Data to return to CLI client:", returnData);
     figma.notify(`Got component information from "${sourceInstance.name}"`);
 
     return returnData;
